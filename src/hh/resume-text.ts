@@ -1,4 +1,4 @@
-import type { BrowserContext, Page } from 'playwright'
+import type { Page } from 'playwright'
 
 export async function extractResumeText(page: Page, hash: string): Promise<string> {
   const url = new URL(page.url())
@@ -49,9 +49,9 @@ export async function extractResumeText(page: Page, hash: string): Promise<strin
   }, url.href)
 }
 
-export async function readResumePrintText(context: BrowserContext, hash: string): Promise<string> {
+export async function readResumePrintText(createPage: () => Promise<Page>, hash: string): Promise<string> {
   if (!/^[a-f0-9]{20,100}$/.test(hash)) throw new Error('Некорректный идентификатор резюме.')
-  const page = await context.newPage()
+  const page = await createPage()
   let stage = 'открытие печатной страницы'
   try {
     await page.route('**/*', route => ['image', 'media', 'font'].includes(route.request().resourceType()) ? route.abort() : route.fallback())

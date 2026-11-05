@@ -42,7 +42,7 @@ export async function checkGenerationStatus(requestId: string, signal: AbortSign
     if (health.ok !== true) return result
     if (!result.cliVersion) return { ...result, state: 'CHECK_FAILED' }
     result.state = 'CHECK_FAILED'
-    const auth = await get(options.refresh ? '/auth/status/refresh' : '/auth/status', 12000)
+    const auth = await get(options.refresh ? '/auth/status/refresh' : '/auth/status', options.refresh ? 45_000 : 12_000)
     if (auth.authenticated === true && auth.limits && typeof auth.limits === 'object') {
       const limits = auth.limits as Record<string, unknown>
       result.limits = { primary: limitWindow(limits.primary), secondary: limitWindow(limits.secondary) }

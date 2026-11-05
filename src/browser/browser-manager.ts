@@ -36,11 +36,32 @@ export class BrowserManager {
     return this.#activeProfileId
   }
 
+  async #newBackgroundPage(context: BrowserContext): Promise<Page> {
+    const anchor = context.pages().find(page => !page.isClosed())
+    if (!anchor) throw new Error('Не удалось открыть фоновую вкладку: нет открытых вкладок браузера.')
+
+    let session: Awaited<ReturnType<BrowserContext['newCDPSession']>> | null = null
+    try {
+      session = await context.newCDPSession(anchor)
+      const nextPage = context.waitForEvent('page', { timeout: 10_000 })
+      void nextPage.catch(() => undefined)
+      const { targetId } = await session.send('Target.createTarget', { url: 'about:blank', background: true })
+      try {
+        return await nextPage
+      } catch {
+        await session.send('Target.closeTarget', { targetId }).catch(() => undefined)
+      }
+    } catch {
+      // Keep the browser usable if the installed Chrome does not support background targets.
+    } finally {
+      await session?.detach().catch(() => undefined)
+    }
+    throw new Error('Не удалось открыть фоновую вкладку браузера.')
+  }
+
   async open(payload: OpenBrowserCommandPayload): Promise<void> {
     if (this.#context) {
-      if (this.#activeProfileId === payload.profileId) {
-        const activePage = this.#context.pages().at(-1)
-        if (activePage) await activePage.bringToFront()
+      if (this.#activeProfileId === payload.profileId && this.#context.pages().some(page => !page.isClosed())) {
         return
       }
       await this.close()
@@ -85,11 +106,11 @@ export class BrowserManager {
       // Повторно используем только страницу профиля или пустую вкладку, не чужую открытую вакансию.
       this.#authorizationPage = context.pages().find((page) => page.url().split('?')[0] === HH_PROFILE_URL)
         ?? context.pages().find((page) => page.url() === 'about:blank')
-        ?? await context.newPage()
+        ?? await this.#newBackgroundPage(context)
     }
     const page = this.#authorizationPage
-    await page.bringToFront()
-    return checkAuthorization(page)
+    const authorization = await checkAuthorization(page)
+    return authorization
   }
 
   #isAuthorizationPage(page: Page): boolean {
@@ -116,7 +137,8 @@ export class BrowserManager {
     if (url.origin !== 'https://hh.ru' || url.search !== '?print=true' || !selected || !this.#context) {
       throw new Error('Резюме не найдено в текущем аккаунте HH. Повторите поиск резюме.')
     }
-    const plainText = await readResumePrintText(this.#context, selected.hhResumeId)
+    const context = this.#context
+    const plainText = await readResumePrintText(() => this.#newBackgroundPage(context), selected.hhResumeId)
     return { authorization, resumes: [{ ...selected, plainText }] }
   }
 
@@ -125,7 +147,7 @@ export class BrowserManager {
       throw new Error('Профиль браузера не запущен')
     }
 
-    const page = await this.#context.newPage()
+    const page = await this.#newBackgroundPage(this.#context)
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded' })
     } catch (error: unknown) {
@@ -137,8 +159,7 @@ export class BrowserManager {
   async inspectApplication(profileId: string, url: string): Promise<ApplicationOutcome> {
     const context = this.#context
     if (!context || this.#activeProfileId !== profileId) return 'BROWSER_UNAVAILABLE'
-    const page = await context.newPage()
-    await page.bringToFront()
+    const page = await this.#newBackgroundPage(context)
     const outcome = await inspectApplication(page, url)
     if (outcome === 'ALREADY_APPLIED') await page.close().catch(() => undefined)
     return outcome
@@ -155,14 +176,13 @@ export class BrowserManager {
     if (url.searchParams.has('resume') && !resumes.some((resume) => resume.hhResumeId === url.searchParams.get('resume'))) {
       throw new Error('Резюме поиска не найдено в текущем профиле HH. Проверьте, в какой аккаунт выполнен вход.')
     }
-    const page = await context.newPage()
-    await page.bringToFront()
+    const page = await this.#newBackgroundPage(context)
     try {
       const vacancies = await collectSearch(page, source, pagesLimit, reportProgress)
       await page.close()
       return { authorization, vacancies }
     } catch (cause) {
-      // Keep the page for manual login/captcha. Do not forward Playwright call logs or HTML.
+      // Keep the page for manual login/captcha without changing window focus.
       if (cause instanceof SearchScanError) throw cause
       throw describeSearchScanFailure(cause, 'завершение сканирования')
     }
@@ -192,8 +212,7 @@ export class BrowserManager {
     if (!/^\d+$/.test(task.hhVacancyId)) return { application: 'TEXT_UNAVAILABLE' }
     const context = this.#context
     if (!context || this.#activeProfileId !== task.profileId) return { application: 'BROWSER_UNAVAILABLE' }
-    const page = await context.newPage()
-    await page.bringToFront()
+    const page = await this.#newBackgroundPage(context)
     let preservePage = false
     try {
       const expected = `https://hh.ru/vacancy/${task.hhVacancyId}`
@@ -247,8 +266,7 @@ export class BrowserManager {
       this.#verifiedApplicationRun = verifiedApplicationRun(task)
     }
     if (!await control.allowed()) return 'STOPPED'
-    const page = await context.newPage()
-    await page.bringToFront()
+    const page = await this.#newBackgroundPage(context)
     const outcome = await applyVacancy(page, task, control)
     if (outcome === 'AUTH' || outcome === 'CAPTCHA' || outcome === 'BROWSER_UNAVAILABLE') {
       this.#verifiedApplicationRun = null
@@ -266,12 +284,12 @@ export class BrowserManager {
 
     const context = await chromium.launchPersistentContext(profileDirectory, {
       channel: 'chrome',
-      timeout: 30_000,
+      timeout: this.#config.launchTimeoutMs,
       headless: false,
       viewport: null,
       chromiumSandbox: true,
       ignoreDefaultArgs: ['--enable-automation'],
-      args: ['--start-maximized'],
+      args: this.#config.disableGpu ? ['--start-maximized', '--disable-gpu'] : ['--start-maximized'],
     })
 
     try {

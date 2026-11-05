@@ -34,7 +34,7 @@ test('print import keeps professional text and paragraphs, blocks images and clo
       return route.fulfill({ contentType: 'text/html', body: fixture })
     })
     const existing = await context.newPage()
-    const text = await readResumePrintText(context, hash)
+    const text = await readResumePrintText(() => context.newPage(), hash)
     assert.match(text, /Built Java services & APIs\./)
     assert.match(text, /- Maintained services\n{1,2}- Improved tests/)
     assert.match(text, /First paragraph\n\nSecond paragraph/)
@@ -53,7 +53,7 @@ test('login redirect and changed resume identity are rejected without leaking pa
     await context.route('**/*', route => route.request().url().includes('/resume/')
       ? route.fulfill({ status: 302, headers: { location: 'https://hh.ru/account/login' } })
       : route.fulfill({ body: '<main>private login data</main>' }))
-    await assert.rejects(readResumePrintText(context, hash), /Не удалось прочитать текст резюме/)
+    await assert.rejects(readResumePrintText(() => context.newPage(), hash), /Не удалось прочитать текст резюме/)
     assert.equal(context.pages().length, 0)
     const page = await context.newPage()
     await assert.rejects(extractResumeText(page, hash), /Resume URL changed/)
@@ -66,7 +66,7 @@ test('title-only resume is imported without experience, education or minimum tex
   try {
     await context.route('**/*', route => route.fulfill({ contentType: 'text/html',
       body: '<main><h2 data-qa="resume-position">QA</h2></main>' }))
-    assert.equal(await readResumePrintText(context, hash), 'QA')
+    assert.equal(await readResumePrintText(() => context.newPage(), hash), 'QA')
     assert.equal(context.pages().length, 0)
   } finally { await browser.close() }
 })
@@ -77,9 +77,9 @@ test('genuinely empty or unexpectedly large text is rejected with a specific rea
   try {
     let body = '<main><h2 data-qa="resume-position" style="min-height: 20px">&nbsp;</h2></main>'
     await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body }))
-    await assert.rejects(readResumePrintText(context, hash), /не содержат текста/)
+    await assert.rejects(readResumePrintText(() => context.newPage(), hash), /не содержат текста/)
     body = `<main><h2 data-qa="resume-position">Developer</h2><div data-qa="resume-about-block">${'x'.repeat(100001)}</div></main>`
-    await assert.rejects(readResumePrintText(context, hash), /100 000 символов/)
+    await assert.rejects(readResumePrintText(() => context.newPage(), hash), /100 000 символов/)
     assert.equal(context.pages().length, 0)
   } finally { await browser.close() }
 })
