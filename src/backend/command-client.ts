@@ -117,11 +117,13 @@ export class CommandClient {
 
     try {
       const result = await executor(command)
-      return { commandId: command.id, status: 'SUCCEEDED', errorMessage: null, authorization: result?.authorization ?? null, resumes: result?.resumes ?? null, vacancies: result?.vacancies ?? null, application: result?.application ?? null, applicationBlocker: result?.applicationBlocker ?? null, vacancyPlainText: result?.vacancyPlainText ?? null }
+      return { commandId: command.id, status: 'SUCCEEDED', errorMessage: null, authorization: result?.authorization ?? null, resumes: result?.resumes ?? null, vacancies: result?.vacancies ?? null, application: result?.application ?? null, applicationBlocker: result?.applicationBlocker ?? null, vacancyPlainText: result?.vacancyPlainText ?? null, selectorDiagnostics: result?.selectorDiagnostics ?? null }
     } catch (error: unknown) {
       const errorMessage = this.#errorMessage(error).slice(0, 1_000)
       console.error(`[browser-agent] Command ${command.id} failed: ${errorMessage}`)
-      return { commandId: command.id, status: 'FAILED', errorMessage, authorization: null, resumes: null, vacancies: null }
+      const selectorDiagnostics = error instanceof Error && 'selectorDiagnostics' in error
+        ? (error.selectorDiagnostics as BrowserAgentCommandResult['selectorDiagnostics']) ?? null : null
+      return { commandId: command.id, status: 'FAILED', errorMessage, authorization: null, resumes: null, vacancies: null, selectorDiagnostics }
     } finally {
       statusConsumer('READY')
     }
@@ -146,6 +148,7 @@ export class CommandClient {
             application: result.application ?? null,
             applicationBlocker: result.applicationBlocker ?? null,
             vacancyPlainText: result.vacancyPlainText ?? null,
+            selectorDiagnostics: result.selectorDiagnostics ?? null,
           }),
           signal: this.#requestSignal(),
         },
@@ -158,7 +161,7 @@ export class CommandClient {
 
       if (response.status === 400 && result.status === 'SUCCEEDED') {
         this.#pendingResult = { ...result, status: 'FAILED', errorMessage: 'Backend отклонил формат результатов. Обновите агент и повторите сканирование.',
-          authorization: null, resumes: null, vacancies: null, application: null }
+          authorization: null, resumes: null, vacancies: null, application: null, selectorDiagnostics: null }
       }
       return response.status === 404 || response.status === 409 ? 'DISCARD' : 'RETRY'
     } catch {

@@ -1,5 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Page } from 'playwright'
+import { loadHhSelectors, type SelectorRegistry } from './selector-registry.js'
+import { waitForStableSearch } from './search-stability.js'
 import { describeSearchScanFailure, SearchScanError } from './search-scan-error.js'
 import { vacancyEnrichmentFromInitialState, type SearchVacancyEnrichment } from './vacancy-search-enrichment.js'
 
@@ -27,8 +29,8 @@ export interface SearchScanProgress {
 }
 
 export type SearchScanProgressReporter = (progress: SearchScanProgress) => Promise<void> | void
+export type SearchWarningReporter = (report: import('./selector-diagnostics.js').SelectorDiagnosticReport) => void
 
-const CARD = '[data-qa="vacancy-serp__vacancy"]'
 
 export function normalizeSearchUrl(source: string): URL {
   const url = new URL(source)
@@ -44,10 +46,10 @@ export function normalizeSearchUrl(source: string): URL {
   return url
 }
 
-async function assertSearchPage(page: Page, expected: URL): Promise<void> {
+async function assertSearchPage(page: Page, expected: URL, registry: SelectorRegistry): Promise<void> {
   const actual = new URL(page.url())
   if (/captcha/i.test(actual.pathname)
-      || await page.locator('[data-qa*="captcha" i], iframe[src*="captcha" i], .smart-captcha').filter({ visible: true }).count()
+      || await page.locator(registry.locator('common', 'searchChallenge')).filter({ visible: true }).count()
       || await page.getByText(/пройдите капчу|подтвердите,? что вы не робот/i).first().isVisible()) {
     throw new SearchScanError('HH запросил проверку безопасности. Пройдите её в браузере и повторите сканирование.')
   }
@@ -60,54 +62,85 @@ async function assertSearchPage(page: Page, expected: URL): Promise<void> {
       || (actual.searchParams.get('page') ?? '0') !== expected.searchParams.get('page')) {
     throw new SearchScanError('Страница поиска изменилась. Во время сканирования не меняйте фильтры в рабочей вкладке.')
   }
-  if (!await page.locator('[data-qa="applicantProfileDesktopDrop-button"], [data-qa="applicantProfileMobileDrop-button"]').filter({ visible: true }).count()) {
+  if (!await page.locator(registry.locator('search', 'accountMenu')).filter({ visible: true }).count()) {
     throw new SearchScanError('Не удалось подтвердить вход на странице поиска. Проверьте браузер.')
   }
-  const currentPages = await page.locator('[data-qa="pager-block"] [aria-current="true"], [data-qa="pager-block"] [aria-current="page"]')
+  const currentPages = await page.locator(registry.locator('search', 'pager')).locator(registry.locator('search', 'currentPage'))
     .evaluateAll((nodes) => nodes.map((node) => node.closest('a')?.getAttribute('href')).filter(Boolean))
   if (currentPages.some((href) => (new URL(href!, actual).searchParams.get('page') ?? '0') !== expected.searchParams.get('page'))) {
     throw new SearchScanError('HH показал другой номер страницы выдачи. Повторите сканирование позже.')
   }
 }
 
-async function readCards(page: Page): Promise<SearchVacancy[]> {
-  const raw = await page.locator(CARD).evaluateAll((cards) => cards.map((card) => {
-    // Keep page callbacks self-contained: named local functions get a Node-only __name
-    // helper from tsx/esbuild. Inline these reads so serialization cannot capture that helper.
-    // The salary span contains <data> numbers and currency. Experience uses <data> too,
-    // so select the compensation block explicitly, without versioned Magritte classes.
-    const compensation = card.querySelector('[class*="compensation-labels--"]')
-    const salaryNode = compensation ? Array.from(compensation.children).find((node) => node.tagName === 'SPAN' && node.querySelector('data')) : undefined
-    const salaryText = (salaryNode?.textContent ?? '').replace(/\s+/g, ' ').trim()
-    const numbers = Array.from(salaryNode?.querySelectorAll('data[value]') ?? [])
-      .map((node) => node.getAttribute('value') ?? '').filter((value) => /^\d+$/.test(value)).map(Number)
-    const currency = salaryNode?.querySelector('data[value="RUB"]') ? 'RUR' : null
+export async function readSearchCards(page: Page, registry: SelectorRegistry = loadHhSelectors(), warnings?: SearchWarningReporter): Promise<SearchVacancy[]> {
+  const definitions = registry.repairContext('search').group.selectors
+  const raw = await page.locator(registry.locator('search', 'cards')).evaluateAll((cards, definitions) => cards.map(card => {
+    // Resolve within each card, including XPath overrides, in one browser round trip.
+    // These inline callbacks must remain independent of tsx's Node-only __name helper.
+    const fields: Record<string, Element[]> = {}
+    for (const key of ['title','employerLink','responseLink','employerName','location','experience','remote','labels',
+      'salaryContainer','salarySpan','salaryValues','rubleCurrency']) {
+      const definition = definitions[key]!
+      const roots = key === 'salarySpan' ? (fields.salaryContainer ?? []).slice(0, 1)
+        : key === 'salaryValues' || key === 'rubleCurrency' ? (fields.salarySpan ?? []).slice(0, 1) : [card]
+      fields[key] = []
+      for (const root of roots) {
+        if (definition.kind === 'css') fields[key]!.push(...root.querySelectorAll(definition.value))
+        else {
+          const result = document.evaluate(definition.value, root, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null)
+          for (let index = 0; index < result.snapshotLength; index++) {
+            const node = result.snapshotItem(index)
+            if (node instanceof Element) fields[key]!.push(node)
+          }
+        }
+      }
+    }
+    const salaryText = (fields.salarySpan?.[0]?.textContent ?? '').replace(/\s+/g, ' ').trim()
+    const numbers = (fields.salaryValues ?? []).map(node => node.getAttribute('value') ?? '')
+      .filter(value => /^\d+$/.test(value)).map(Number)
+    const currency = fields.rubleCurrency?.length ? 'RUR' : null
     const knownTaxes = /на руки|до вычета налогов/i.test(salaryText)
+    const cardText = (card as HTMLElement).innerText.replace(/\s+/g, ' ').trim()
     const salary = currency && numbers.length && /за месяц/i.test(salaryText) && knownTaxes ? {
       from: /^до\s/i.test(salaryText) ? null : numbers[0] ?? null,
       to: numbers.length > 1 ? numbers[1] ?? null : /^до\s/i.test(salaryText) ? numbers[0] ?? null : null,
       currency, gross: /до вычета налогов/i.test(salaryText),
     } : null
-    const labels = Array.from(card.querySelectorAll('[data-qa^="vacancy-label-"], [data-qa^="vacancy-serp__vacancy-compensation-frequency-"]'))
-      .map((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
     return {
-      href: card.querySelector('[data-qa="serp-item__title"]')?.getAttribute('href'),
-      employerHref: card.querySelector('[data-qa="vacancy-serp__vacancy-employer"]')?.getAttribute('href'),
-      responseHref: card.querySelector('[data-qa="vacancy-serp__vacancy_response"]')?.getAttribute('href'),
-      title: (card.querySelector('[data-qa="serp-item__title"]')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      companyName: (card.querySelector('[data-qa="vacancy-serp__vacancy-employer-text"]')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      location: (card.querySelector('[data-qa="vacancy-serp__vacancy-address"]')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      experience: (card.querySelector('[data-qa^="vacancy-serp__vacancy-work-experience-"]')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      workFormat: (card.querySelector('[data-qa="vacancy-label-work-schedule-remote"]')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      salaryText, salary, labels,
+      cardText,
+      // Independent visible text gives a reason to suspect a missed optional field;
+      // absence across cards alone is not evidence of a broken selector.
+      missedFields: [
+        !salaryText && /\d[\d\s]*\s*(?:₽|руб\.?|USD|EUR|RUB|\$|€)/i.test(cardText) ? 'salarySpan' : '',
+        salaryText && /\d/.test(salaryText) && /за месяц/i.test(salaryText) && /₽|руб/i.test(salaryText)
+          && !numbers.length ? 'salaryValues' : '',
+        salaryText && /₽|руб/i.test(salaryText) && !fields.rubleCurrency?.length ? 'rubleCurrency' : '',
+        !fields.experience?.length && /без опыта|опыт.{0,30}(?:лет|год)|\d\s*[–—-]\s*\d\s*(?:лет|год)/i.test(cardText) ? 'experience' : '',
+        !fields.remote?.length && /удал[её]нн/i.test(cardText) ? 'remote' : '',
+        !fields.labels?.length && /выплаты.{0,30}(?:раз|месяц|недел)|отклик без резюме/i.test(cardText) ? 'labels' : '',
+        !fields.employerLink?.length && [...card.querySelectorAll('a[href]')].some(anchor => {
+          try { const link = new URL(anchor.getAttribute('href')!, location.href); return link.origin === location.origin && /^\/employer\/\d+\/?$/.test(link.pathname) }
+          catch { return false }
+        }) ? 'employerLink' : '',
+      ].filter(Boolean),
+      invalidRequired: fields.title?.length !== 1 || fields.employerName?.length !== 1,
+      href: fields.title?.[0]?.getAttribute('href'),
+      employerHref: fields.employerLink?.[0]?.getAttribute('href'),
+      responseHref: fields.responseLink?.[0]?.getAttribute('href'),
+      title: (fields.title?.[0]?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      companyName: (fields.employerName?.[0]?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      location: (fields.location?.[0]?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      experience: (fields.experience?.[0]?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      workFormat: (fields.remote?.[0]?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      salaryText, salary, labels: (fields.labels ?? []).map(node => (node.textContent ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean),
     }
-  }))
+  }), definitions)
   if (raw.length > 100) throw new SearchScanError('HH вернул неожиданное число карточек. Сканирование остановлено.')
   const cards = raw.map((card, position) => {
     const url = new URL(card.href ?? '', page.url())
     const hhVacancyId = url.pathname.match(/^\/vacancy\/(\d+)\/?$/)?.[1]
     if (!hhVacancyId || url.protocol !== 'https:' || !(url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru'))
-        || !card.title || !card.companyName) throw new SearchScanError('Не удалось распознать обязательные поля карточки вакансии.')
+        || card.invalidRequired || !card.title || !card.companyName) throw new SearchScanError('Не удалось распознать обязательные поля карточки вакансии.')
     let employerId: string | null = null
     if (card.employerHref) {
       const employerUrl = new URL(card.employerHref, page.url())
@@ -125,26 +158,46 @@ async function readCards(page: Page): Promise<SearchVacancy[]> {
       salaryText: card.salaryText, salary: card.salary, location: card.location, workFormat: card.workFormat,
       experience: card.experience, labels: [...new Set(card.labels)], position, publishedAt: null, enrichment: null }
   })
-  const initialState = await page.locator('#HH-Lux-InitialState').evaluate((node) => {
+  const initialState = await readSearchInitialState(page, registry)
+  const enrichments = vacancyEnrichmentFromInitialState(cards.map((card) => card.hhVacancyId), initialState)
+  const missing = [...new Set(raw.flatMap((card, index) => {
+    const address = enrichments?.[index]?.enrichment.address?.replace(/\s+/g, ' ').trim()
+    return !card.location && address && card.cardText.includes(address) ? [...card.missedFields, 'location'] : card.missedFields
+  }))]
+  if (warnings && missing.length) warnings({
+    pageType: 'SEARCH', status: 'CHECKED', summary: 'FAILED', checkedAt: new Date().toISOString(),
+    message: 'Некоторые дополнительные поля карточек могли быть прочитаны не полностью. Это предупреждение не останавливает сбор вакансий.',
+    rows: missing.map(key => ({ group: 'search', key, purpose: definitions[key]!.purpose,
+      selector: registry.locator('search', key), source: registry.source('search', key), required: false,
+      status: 'FAIL', matched: 0, visible: 0,
+      message: 'В тексте карточки есть признаки данных, но селектор поля их не прочитал. Требуется точечная проверка страницы.' })),
+  })
+  return cards.map((card, index) => enrichments ? { ...card, ...enrichments[index] } : card)
+}
+
+async function readSearchInitialState(page: Page, registry: SelectorRegistry): Promise<unknown> {
+  const target = page.locator(registry.locator('search', 'initialState'))
+  if (await target.count() !== 1) return null
+  return target.evaluate((node) => {
     try {
       const content = node instanceof HTMLTemplateElement ? node.content.textContent : node.textContent
       return content ? JSON.parse(content) : null
     } catch { return null }
   }).catch(() => null)
-  const enrichments = vacancyEnrichmentFromInitialState(cards.map((card) => card.hhVacancyId), initialState)
-  return cards.map((card, index) => enrichments ? { ...card, ...enrichments[index] } : card)
 }
 
-export async function collectSearch(page: Page, source: string, pagesLimit: number, reportProgress?: SearchScanProgressReporter): Promise<SearchVacancy[]> {
+export async function collectSearch(page: Page, source: string, pagesLimit: number, reportProgress?: SearchScanProgressReporter, registry: SelectorRegistry = loadHhSelectors(), warnings?: SearchWarningReporter,
+    continueAfterWarning?: (page: Page) => Promise<Page>): Promise<SearchVacancy[]> {
   const progress = { stage: 'подготовка поиска', pageNumber: 0 }
   try {
-    return await collectSearchPages(page, source, pagesLimit, progress, reportProgress)
+    return await collectSearchPages(page, source, pagesLimit, progress, reportProgress, registry, warnings, continueAfterWarning)
   } catch (cause) {
     throw describeSearchScanFailure(cause, progress.stage, progress.pageNumber)
   }
 }
 
-async function collectSearchPages(page: Page, source: string, pagesLimit: number, progress: { stage: string; pageNumber: number }, reportProgress?: SearchScanProgressReporter): Promise<SearchVacancy[]> {
+async function collectSearchPages(page: Page, source: string, pagesLimit: number, progress: { stage: string; pageNumber: number }, reportProgress?: SearchScanProgressReporter, registry: SelectorRegistry = loadHhSelectors(), warnings?: SearchWarningReporter,
+    continueAfterWarning?: (page: Page) => Promise<Page>): Promise<SearchVacancy[]> {
   if (!Number.isInteger(pagesLimit) || pagesLimit < 1 || pagesLimit > 20) throw new SearchScanError('Недопустимый лимит страниц.')
   const url = normalizeSearchUrl(source)
   const result = new Map<string, SearchVacancy>()
@@ -158,42 +211,28 @@ async function collectSearchPages(page: Page, source: string, pagesLimit: number
     if (!response || response.status() >= 400) throw new SearchScanError('HH не загрузил выдачу. Проверьте вкладку и повторите сканирование.')
     // DOM remains authoritative. HH-Lux-InitialState is used only when its ordered ids match these settled cards.
     progress.stage = 'ожидание карточек'
-    let fingerprint = ''
-    let stable = 0
-    let ready = false
-    const deadline = Date.now() + 45_000
-    while (Date.now() < deadline) {
-      const snapshot = await page.locator(`${CARD}, [data-qa="pager-block"]`).evaluateAll((nodes) => nodes.map((node) => ({
-        qa: node.getAttribute('data-qa'), text: node.textContent,
-        links: Array.from(node.querySelectorAll('a[href]')).map((link) => link.getAttribute('href')),
-      })))
-      const hasCards = snapshot.some((node) => node.qa === 'vacancy-serp__vacancy')
-      const next = JSON.stringify(snapshot)
-      stable = next === fingerprint && hasCards ? stable + 1 : 0
-      fingerprint = next
-      if (stable >= 5) { ready = true; break }
-      if (!hasCards && await page.getByText(/по вашему запросу (?:ничего не найдено|не найдено вакансий)/i).first().isVisible()) {
-        progress.stage = 'проверка страницы'
-        await assertSearchPage(page, url)
-        await reportProgress?.({ currentPage: 1, totalPages: 1, collected: 0, totalResults: 0 })
-        return [...result.values()]
-      }
-      await delay(500)
+    const settled = await waitForStableSearch(page, registry, { timeoutMs: 45_000 })
+    if (settled === 'EMPTY') {
+      await assertSearchPage(page, url, registry)
+      await reportProgress?.({ currentPage: 1, totalPages: 1, collected: 0, totalResults: 0 })
+      return [...result.values()]
     }
+    const ready = settled === 'STABLE'
     progress.stage = 'проверка страницы'
-    await assertSearchPage(page, url)
+    await assertSearchPage(page, url, registry)
     if (!ready) throw new SearchScanError('Выдача не загрузилась или изменилась разметка HH. Пустой результат не сохранён.')
     progress.stage = 'чтение карточек'
-    const cards = await readCards(page)
+    let hasWarning = false
+    const cards = await readSearchCards(page, registry, warning => { hasWarning = true; warnings?.(warning) })
     const ids = cards.map((card) => card.hhVacancyId).join(',')
     if (!cards.length || fingerprints.has(ids)) throw new SearchScanError('HH повторил страницу выдачи. Повторите сканирование позже.')
     fingerprints.add(ids)
     cards.forEach((card, index) => {
       if (!result.has(card.hhVacancyId)) result.set(card.hhVacancyId, { ...card, position: pageIndex * 100 + index })
     })
-    if (totalResults === null) totalResults = await readTotalResults(page)
+    if (totalResults === null) totalResults = await readTotalResults(page, registry)
     progress.stage = 'чтение пагинации'
-    const pages = await page.locator('[data-qa="pager-block"] a[href]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('href')))
+    const pages = await page.locator(registry.locator('search', 'pager')).locator(registry.locator('search', 'pageLinks')).evaluateAll((nodes) => nodes.map((node) => node.getAttribute('href')))
     const hasNext = pages.some((href) => {
       if (!href) return false
       const target = new URL(href, url)
@@ -201,7 +240,7 @@ async function collectSearchPages(page: Page, source: string, pagesLimit: number
         && Number(target.searchParams.get('page')) > pageIndex
     })
     progress.stage = 'проверка страницы после чтения'
-    await assertSearchPage(page, url)
+    await assertSearchPage(page, url, registry)
     if (totalResults !== null && totalResults < result.size) totalResults = null
     const totalPages = searchScanTotalPages(totalResults, pagesLimit, pageIndex + 1, hasNext)
     await reportProgress?.({
@@ -211,18 +250,14 @@ async function collectSearchPages(page: Page, source: string, pagesLimit: number
       totalResults,
     })
     if (!hasNext) return [...result.values()]
+    if (hasWarning && continueAfterWarning) page = await continueAfterWarning(page)
     await delay(1500)
   }
   return [...result.values()]
 }
 
-async function readTotalResults(page: Page): Promise<number | null> {
-  return page.locator('#HH-Lux-InitialState').evaluate((node) => {
-    try {
-      const content = node instanceof HTMLTemplateElement ? node.content.textContent : node.textContent
-      return content ? JSON.parse(content) : null
-    } catch { return null }
-  }).then(searchTotalResultsFromInitialState).catch(() => null)
+async function readTotalResults(page: Page, registry: SelectorRegistry): Promise<number | null> {
+  return readSearchInitialState(page, registry).then(searchTotalResultsFromInitialState).catch(() => null)
 }
 
 export function searchTotalResultsFromInitialState(state: unknown): number | null {

@@ -1,9 +1,47 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { chromium, type Page } from 'playwright'
-import { applyVacancy, inspectApplication, vacancyArchived, type ApplicationTask, type ApplicationControl } from '../src/hh/application.js'
+import { applyVacancy as apply, inspectApplication as inspect, vacancyArchived as archived, type ApplicationTask, type ApplicationControl } from '../src/hh/application.js'
+import { bundledSelectors } from './helpers/bundled-selectors.js'
+import { readFileSync } from 'node:fs'
+import { parseSelectorGroup, SelectorRegistry } from '../src/hh/selector-registry.js'
 
 const target = 'https://hh.ru/vacancy/123'
+const bundled = bundledSelectors()
+const applyVacancy: typeof apply = (page, task, control, registry = bundled) => apply(page, task, control, registry)
+const inspectApplication: typeof inspect = (page, url, registry = bundled) => inspect(page, url, registry)
+const vacancyArchived: typeof archived = (page, url, registry = bundled) => archived(page, url, registry)
+
+function configuredApplication(change: (registry: ReturnType<typeof parseSelectorGroup>) => void): SelectorRegistry {
+  return new SelectorRegistry(['common', 'vacancy', 'response-form', 'letter-form'].map(file => {
+    const group = parseSelectorGroup(JSON.parse(readFileSync(new URL(`../resources/hh-selectors/${file}.json`, import.meta.url), 'utf8')))
+    change(group)
+    return group
+  }))
+}
+
+test('application honors configured action selectors instead of falling back to hardcoded buttons', async () => {
+  const registry = configuredApplication(group => {
+    if (group.id === 'vacancy') {
+      group.selectors.title!.kind = 'xpath'; group.selectors.title!.value = '//h1'
+      group.selectors.respond!.value = '.missing-configured-response'
+    }
+  })
+  await offline('immediate', { success: true }, async (page, control, _requests, permits) => {
+    assert.equal(await applyVacancy(page, task, control, registry), 'NOT_SENT')
+    assert.equal(permits(), 0)
+  })
+})
+
+test('letter attachment uses the configured attach control after confirmed delivery', async () => {
+  const registry = configuredApplication(group => {
+    if (group.id === 'letterForm') group.selectors.attach!.value = '.missing-configured-attach'
+  })
+  await offline('immediate', { success: true }, async (page, control, _requests, permits) => {
+    assert.equal(await applyVacancy(page, task, control, registry), 'SENT_LETTER_UNCONFIRMED')
+    assert.equal(permits(), 1)
+  })
+})
 const task: ApplicationTask = {
   itemId: 'test-item', runId: 'test-run', profileId: 'test-profile', hhResumeId: 'ABC123', hhVacancyId: '123',
   // Deliberately invalid search metadata: detail application must not depend on it.
@@ -120,7 +158,7 @@ function fixture(mode: 'popup' | 'immediate' | 'already' | 'recommendation-only'
 }
 
 async function offline(mode: Parameters<typeof fixture>[0], responseBody: unknown,
-  run: (page: Page, control: ApplicationControl, requests: string[], permits: () => number) => Promise<void>): Promise<void> {
+  run: (page: Page, control: ApplicationControl, requests: string[], permits: () => number) => Promise<void>, extraHtml = ''): Promise<void> {
   const browser = await chromium.launch({ headless: true })
   try {
     const context = await browser.newContext({ serviceWorkers: 'block' })
@@ -130,7 +168,7 @@ async function offline(mode: Parameters<typeof fixture>[0], responseBody: unknow
       const request = route.request()
       requests.push(request.url())
       if (request.url() === target && request.method() === 'GET') {
-        await route.fulfill({ contentType: 'text/html; charset=utf-8', body: fixture(mode) })
+        await route.fulfill({ contentType: 'text/html; charset=utf-8', body: fixture(mode) + extraHtml })
       } else if (request.url() === 'https://hh.ru/applicant/vacancy_response/edit_ajax' && request.method() === 'POST') {
         await route.fulfill({ contentType: 'application/json', body: JSON.stringify(responseBody) })
       } else await route.abort()
@@ -150,6 +188,81 @@ test('detail popup selects by hash, closes already-selected list and finds foote
     assert.equal(requests.some(url => url.includes('/search/')), false)
     assert.equal(requests.some(url => url.includes('vacancyId=999')), false)
   })
+})
+
+// This advisory is deliberately not recognised by text or selector: only pointer interception matters.
+const advisory = `<script>
+  const showAdvice = () => {
+    const advice = document.createElement('aside');
+    advice.style.cssText = 'position:fixed;inset:0;z-index:999999;background:white';
+    advice.textContent = 'Optional profile advice'; document.body.append(advice);
+  };
+</script>`
+
+test('an advisory hiding Apply is cleared by one reload before requesting a permit', async () => {
+  await offline('immediate', { success: true }, async (page, control, requests, permits) => {
+    assert.equal(await applyVacancy(page, { ...task, coverLetter: '' }, control), 'SENT')
+    assert.equal(requests.filter(url => url === target).length, 2)
+    assert.equal(permits(), 1)
+    assert.equal(await page.evaluate('window.submissions'), 1)
+  }, advisory + `<script>if (!sessionStorage.getItem('advice-once')) {
+    sessionStorage.setItem('advice-once', '1'); showAdvice();
+  }</script>`)
+})
+
+test('an advisory that survives reload stops without force click or repeated reloads', async () => {
+  await offline('immediate', {}, async (page, control, requests, permits) => {
+    assert.equal(await applyVacancy(page, task, control), 'NOT_SENT')
+    assert.equal(requests.filter(url => url === target).length, 2)
+    assert.equal(permits(), 0)
+  }, advisory + '<script>showAdvice();</script>')
+})
+
+test('captcha is never dismissed through an advisory recovery reload', async () => {
+  await offline('immediate', {}, async (page, control, requests, permits) => {
+    assert.equal(await applyVacancy(page, task, control), 'CAPTCHA')
+    assert.equal(requests.filter(url => url === target).length, 1)
+    assert.equal(permits(), 0)
+  }, '<div data-qa="captcha" style="position:fixed;inset:0;z-index:999999">Security check</div>')
+})
+
+test('advice after delivery reloads into letter attachment without another permit or generation', async () => {
+  await offline('immediate', { success: true }, async (page, control, requests, permits) => {
+    let generations = 0
+    const outcome = await applyVacancy(page, task, { ...control, prepareLetter: async () => {
+      generations++
+      return { text: task.coverLetter, source: 'GENERATED', errorCode: null, generationId: 'synthetic' }
+    } })
+    assert.equal(outcome, 'SENT')
+    assert.equal(requests.filter(url => url === target).length, 2)
+    assert.equal(requests.filter(url => url.endsWith('/edit_ajax')).length, 1)
+    assert.equal(permits(), 1)
+    assert.equal(generations, 1)
+    assert.equal(await page.evaluate('window.submissions'), 0) // Counter reset after reload; no new response.
+  }, advisory + `<script>
+    document.querySelector('[data-qa="vacancy-response-link-top"]')?.addEventListener('click', () => {
+      if (!sessionStorage.getItem('advice-once')) { sessionStorage.setItem('advice-once', '1'); showAdvice(); }
+    });
+  </script>`)
+})
+
+test('advice while filling the response form preserves prepared letter and the first permit', async () => {
+  await offline('popup', {}, async (page, control, requests, permits) => {
+    let generations = 0
+    assert.equal(await applyVacancy(page, task, { ...control, prepareLetter: async () => {
+      generations++
+      return { text: task.coverLetter, source: 'GENERATED', errorCode: null, generationId: 'synthetic' }
+    } }), 'SENT')
+    assert.equal(requests.filter(url => url === target).length, 2)
+    assert.equal(permits(), 1)
+    assert.equal(generations, 1)
+    assert.equal(await page.evaluate('window.submittedLetter'), task.coverLetter)
+    assert.equal(await page.evaluate('window.submissions'), 1)
+  }, advisory + `<script>
+    document.querySelector('#RESPONSE_MODAL_FORM_ID textarea').addEventListener('input', () => {
+      if (!sessionStorage.getItem('advice-once')) { sessionStorage.setItem('advice-once', '1'); showAdvice(); }
+    });
+  </script>`)
 })
 
 test('archived detail is not an application error and does not collect text or request submission', async () => {

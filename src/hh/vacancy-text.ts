@@ -1,18 +1,20 @@
 import type { Page } from 'playwright'
 import { isVacancyDetailUrl } from './application-evidence.js'
+import { loadHhSelectors, type SelectorRegistry } from './selector-registry.js'
 
 /** null = not read; empty string = recognized description without textual content. */
-export async function extractVacancyText(page: Page, hhVacancyId: string): Promise<string | null> {
+export async function extractVacancyText(page: Page, hhVacancyId: string, registry?: SelectorRegistry): Promise<string | null> {
   try {
     if (!/^\d+$/.test(hhVacancyId)) return null
     const expectedUrl = page.url()
     if (!isVacancyDetailUrl(expectedUrl, `https://hh.ru/vacancy/${hhVacancyId}`)) return null
-    return await page.evaluate(({ expectedUrl }) => {
+    const selectors = registry ?? loadHhSelectors()
+    return await page.locator(selectors.locator('vacancy', 'description')).evaluateAll((candidates, { expectedUrl }) => {
       if (location.href !== expectedUrl) return null
       // Both ordinary and branded HH layouts mark the employer's description this way.
       // Do not include the surrounding brand template, skills or recommendations.
       // Despite its name, .vacancy-description-print also wraps the visible branded layout.
-      const sections = [...document.querySelectorAll<HTMLElement>('[data-qa="vacancy-description"]')]
+      const sections = candidates
         .filter(node => !node.closest('[data-qa="vacancy-serp__vacancy"], [data-qa="vacancy-view-vacancies-from-search"], [hidden], [aria-hidden="true"]')
           && getComputedStyle(node).visibility !== 'hidden'
           && getComputedStyle(node).display !== 'none' && node.getClientRects().length > 0)

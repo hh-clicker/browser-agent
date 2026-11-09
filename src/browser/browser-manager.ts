@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import { installAssessmentAssistant } from '../assessment/assistant.js'
@@ -10,8 +11,15 @@ import { collectSearch, normalizeSearchUrl, type SearchScanProgressReporter, typ
 import { describeSearchScanFailure, SearchScanError } from '../hh/search-scan-error.js'
 import { applyVacancy, applicationBarrier, inspectApplication, vacancyArchived, type ApplicationTask, type ApplicationControl, type ApplicationOutcome, type ApplicationBlocker } from '../hh/application.js'
 import { extractVacancyText } from '../hh/vacancy-text.js'
+import { diagnoseSelectors, type DiagnosticPageType, type SelectorDiagnosticReport } from '../hh/selector-diagnostics.js'
 import { isVacancyDetailUrl } from '../hh/application-evidence.js'
 import { isApplicationRunVerified, verifiedApplicationRun, type VerifiedApplicationRun } from './application-run-verification.js'
+import { DiagnosticPages } from './diagnostic-pages.js'
+import { focusVacancyTab } from './vacancy-tab.js'
+import { runFullSelectorDiagnostics, type SelectorDiagnosticTarget } from '../hh/selector-diagnostic-runner.js'
+import { loadHhSelectors } from '../hh/selector-registry.js'
+import { offerSelectorRepair, repairReadSelectors } from '../hh/selector-repair.js'
+import { runtimeSelectorIssue } from '../hh/runtime-selector-issue.js'
 
 import type { OpenBrowserCommandPayload } from '../backend/browser-agent-command.js'
 import type { BrowserConfig } from '../config/browser-config.js'
@@ -23,6 +31,33 @@ export class BrowserManager {
   #opening: Promise<void> | null = null
   #authorizationPage: Page | null = null
   #verifiedApplicationRun: VerifiedApplicationRun | null = null
+  readonly #applicationPages = new Map<string, Page>()
+  readonly #diagnosticPages = new Map<string, Page>()
+  readonly #diagnosticChoices = new DiagnosticPages()
+  #fullDiagnostic: { report: SelectorDiagnosticReport; target: SelectorDiagnosticTarget } | null = null
+  #runtimePage: Page | null = null
+  #runtimeWarning: SelectorDiagnosticReport | null = null
+
+  beginRuntimeCommand(): void { this.#runtimePage = null; this.#runtimeWarning = null }
+
+  #retainDiagnosticPage(page: Page): string {
+    for (const [id, previous] of this.#diagnosticPages) {
+      if (previous.isClosed()) this.#diagnosticPages.delete(id)
+      else if (previous === page) return id
+    }
+    if (this.#diagnosticPages.size >= 40) this.#diagnosticPages.delete(this.#diagnosticPages.keys().next().value!)
+    const id = randomUUID(); this.#diagnosticPages.set(id, page); return id
+  }
+
+  async finishRuntimeCommand(problem: boolean): Promise<SelectorDiagnosticReport | null> {
+    const page = this.#runtimePage
+    const report = (problem && page ? await runtimeSelectorIssue(page) : null) ?? this.#runtimeWarning
+    if (!report) return null
+    if (!report.tabId && page && !page.isClosed()) report.tabId = this.#retainDiagnosticPage(page)
+    // Repair availability is re-evaluated only after an explicit diagnostic action.
+    report.repairableGroups = []
+    return report
+  }
 
   constructor(config: BrowserConfig) {
     this.#config = config
@@ -34,6 +69,63 @@ export class BrowserManager {
 
   get activeProfileId(): string | null {
     return this.#activeProfileId
+  }
+
+  async diagnoseSelectors(profileId: string, pageType: DiagnosticPageType | 'CURRENT' | 'FULL', target?: SelectorDiagnosticTarget | null, requestId: string = randomUUID()): Promise<SelectorDiagnosticReport> {
+    if (!this.#context || this.#activeProfileId !== profileId) throw new Error('Профиль браузера не запущен')
+    const context = this.#context
+    const ports = {
+      createPage: () => this.#newBackgroundPage(context),
+      retainPage: (page: Page) => {
+        for (const [id, previous] of this.#diagnosticPages) if (previous.isClosed()) this.#diagnosticPages.delete(id)
+        if (this.#diagnosticPages.size >= 40) this.#diagnosticPages.delete(this.#diagnosticPages.keys().next().value!)
+        const id = randomUUID(); this.#diagnosticPages.set(id, page); return id
+      },
+    }
+    if (target?.repairGroup) {
+      if (pageType !== 'CURRENT' || !target.tabId) throw new Error('Для исправления выберите проверенную вкладку.')
+      const page = this.#diagnosticPages.get(target.tabId) ?? this.#diagnosticChoices.get(target.tabId)
+      if (!page || page.isClosed() || !context.pages().includes(page)) throw new Error('Вкладка закрыта или список устарел. Повторите диагностику.')
+      const result = await repairReadSelectors(page, target.repairGroup, requestId)
+      result.tabId = target.tabId
+      const full = this.#fullDiagnostic
+      if (full?.report.scenarios?.some(step => step.tabId === target.tabId && step.pageType === result.pageType)) {
+        full.report = await runFullSelectorDiagnostics(full.target, ports, loadHhSelectors(), { previous: full.report, repaired: result, page })
+        return full.report
+      }
+      return result
+    }
+    if (pageType === 'FULL') {
+      this.#fullDiagnostic = null
+      const diagnosticTarget = target ?? { hhResumeId: null, searchUrl: null, searchName: null }
+      const result = await runFullSelectorDiagnostics(diagnosticTarget, ports)
+      this.#fullDiagnostic = { report: structuredClone(result), target: structuredClone(diagnosticTarget) }
+      return result
+    }
+    if (pageType !== 'CURRENT') {
+      const pages = context.pages().filter(page => !page.isClosed())
+      if (pages.length !== 1) throw new Error('Для проверки выберите вкладку через режим CURRENT.')
+      return diagnoseSelectors(pages[0]!, pageType)
+    }
+    if (!target?.tabId) {
+      return { pageType: 'UNKNOWN', checkedAt: new Date().toISOString(), status: 'SELECT_TAB',
+        message: 'Выберите открытую вкладку для проверки.', rows: [],
+        tabs: this.#diagnosticChoices.list(context.pages()) }
+    }
+    const retained = this.#diagnosticPages.get(target.tabId)
+    const page = retained && !retained.isClosed() && context.pages().includes(retained)
+      ? retained : this.#diagnosticChoices.selected(target.tabId, context.pages())
+    const registry = loadHhSelectors()
+    const result = await offerSelectorRepair(page, await diagnoseSelectors(page, undefined, registry), registry)
+    result.tabId = target.tabId
+    return result
+  }
+
+  async focusDiagnostic(profileId: string, tabId: string): Promise<void> {
+    const page = this.#diagnosticPages.get(tabId) ?? this.#diagnosticChoices.get(tabId)
+    if (!this.#context || this.#activeProfileId !== profileId || !page || page.isClosed() || !this.#context.pages().includes(page))
+      throw new Error('Вкладка диагностики уже закрыта или браузер перезапущен.')
+    await page.bringToFront().catch(() => { throw new Error('Не удалось показать вкладку диагностики.') })
   }
 
   async #newBackgroundPage(context: BrowserContext): Promise<Page> {
@@ -95,7 +187,17 @@ export class BrowserManager {
     this.#activeProfileId = null
     this.#authorizationPage = null
     this.#verifiedApplicationRun = null
+    this.#applicationPages.clear()
+    this.#diagnosticPages.clear()
+    this.#diagnosticChoices.clear()
+    this.#fullDiagnostic = null
     await context.close()
+  }
+
+  async focusVacancy(profileId: string, url: string): Promise<void> {
+    if (!this.#context || this.#activeProfileId !== profileId) throw new Error('Браузер нужного аккаунта закрыт.')
+    const id = new URL(url).pathname.split('/')[2] ?? ''
+    await focusVacancyTab(this.#context.pages(), url, this.#applicationPages.get(id))
   }
 
   async checkAuthorization(profileId: string): Promise<AuthorizationCheckResult> {
@@ -109,6 +211,7 @@ export class BrowserManager {
         ?? await this.#newBackgroundPage(context)
     }
     const page = this.#authorizationPage
+    this.#runtimePage = page
     const authorization = await checkAuthorization(page)
     return authorization
   }
@@ -138,7 +241,15 @@ export class BrowserManager {
       throw new Error('Резюме не найдено в текущем аккаунте HH. Повторите поиск резюме.')
     }
     const context = this.#context
-    const plainText = await readResumePrintText(() => this.#newBackgroundPage(context), selected.hhResumeId)
+    const plainText = await readResumePrintText(async () => {
+      const printPage = await this.#newBackgroundPage(context)
+      this.#runtimePage = printPage
+      return printPage
+    }, selected.hhResumeId, loadHhSelectors(), async printPage => {
+      const issue = await runtimeSelectorIssue(printPage)
+      if (issue) { issue.tabId = this.#retainDiagnosticPage(printPage); this.#runtimeWarning = issue; return true }
+      return false
+    })
     return { authorization, resumes: [{ ...selected, plainText }] }
   }
 
@@ -160,6 +271,7 @@ export class BrowserManager {
     const context = this.#context
     if (!context || this.#activeProfileId !== profileId) return 'BROWSER_UNAVAILABLE'
     const page = await this.#newBackgroundPage(context)
+    this.#runtimePage = page
     const outcome = await inspectApplication(page, url)
     if (outcome === 'ALREADY_APPLIED') await page.close().catch(() => undefined)
     return outcome
@@ -176,10 +288,20 @@ export class BrowserManager {
     if (url.searchParams.has('resume') && !resumes.some((resume) => resume.hhResumeId === url.searchParams.get('resume'))) {
       throw new Error('Резюме поиска не найдено в текущем профиле HH. Проверьте, в какой аккаунт выполнен вход.')
     }
-    const page = await this.#newBackgroundPage(context)
+    let page = await this.#newBackgroundPage(context)
+    this.#runtimePage = page
     try {
-      const vacancies = await collectSearch(page, source, pagesLimit, reportProgress)
-      await page.close()
+      let warningUrl: string | null = null
+      const vacancies = await collectSearch(page, source, pagesLimit, reportProgress, loadHhSelectors(), report => {
+        if (!this.#runtimeWarning) { this.#runtimeWarning = report; warningUrl = page.url() }
+      }, async warningPage => {
+        if (!this.#runtimeWarning || this.#runtimeWarning.tabId) return warningPage
+        this.#runtimeWarning.tabId = this.#retainDiagnosticPage(warningPage)
+        page = await this.#newBackgroundPage(context)
+        this.#runtimePage = page
+        return page
+      })
+      if (!this.#runtimeWarning || warningUrl !== page.url()) await page.close()
       return { authorization, vacancies }
     } catch (cause) {
       // Keep the page for manual login/captcha without changing window focus.
@@ -212,12 +334,15 @@ export class BrowserManager {
     if (!/^\d+$/.test(task.hhVacancyId)) return { application: 'TEXT_UNAVAILABLE' }
     const context = this.#context
     if (!context || this.#activeProfileId !== task.profileId) return { application: 'BROWSER_UNAVAILABLE' }
+    const registry = loadHhSelectors()
     const page = await this.#newBackgroundPage(context)
+    this.#runtimePage = page
     let preservePage = false
+    let inspectFailure = false
     try {
       const expected = `https://hh.ru/vacancy/${task.hhVacancyId}`
       const response = await page.goto(expected, { waitUntil: 'domcontentloaded', timeout: 20_000 })
-      const barrier = await applicationBarrier(page)
+      const barrier = await applicationBarrier(page, undefined, registry)
       if (barrier === 'AUTH' || barrier === 'CAPTCHA') {
         preservePage = true
         return { application: barrier }
@@ -225,21 +350,27 @@ export class BrowserManager {
       if (response && [404, 410].includes(response.status())) return { application: 'VACANCY_UNAVAILABLE' }
       if (!response || response.status() >= 400 || !isVacancyDetailUrl(page.url(), expected))
         return { application: 'TEXT_UNAVAILABLE' }
-      await page.locator('h1[data-qa="vacancy-title"]').filter({ visible: true })
+      inspectFailure = true
+      await page.locator(registry.locator('vacancy', 'title')).filter({ visible: true })
         .waitFor({ state: 'visible', timeout: 15_000 })
-      if (await vacancyArchived(page, expected)) return { application: 'VACANCY_ARCHIVED' }
-      const text = await extractVacancyText(page, task.hhVacancyId)
-      if (!await allowed()) return { application: 'STOPPED' }
+      if (await vacancyArchived(page, expected, registry)) { inspectFailure = false; return { application: 'VACANCY_ARCHIVED' } }
+      const text = await extractVacancyText(page, task.hhVacancyId, registry)
+      if (!await allowed()) { inspectFailure = false; return { application: 'STOPPED' } }
+      if (text?.trim()) inspectFailure = false
       return text?.trim() ? { application: 'TEXT_LOADED', vacancyPlainText: text }
         : { application: 'TEXT_UNAVAILABLE' }
     } catch {
-      const barrier = await applicationBarrier(page).catch(() => null)
+      const barrier = await applicationBarrier(page, undefined, registry).catch(() => null)
       if (barrier === 'AUTH' || barrier === 'CAPTCHA') {
         preservePage = true
         return { application: barrier }
       }
       return { application: 'TEXT_UNAVAILABLE' }
     } finally {
+      if (!preservePage && inspectFailure) {
+        const issue = await runtimeSelectorIssue(page)
+        if (issue) { this.#runtimeWarning = issue; preservePage = true }
+      }
       if (!preservePage) await page.close().catch(() => undefined)
     }
   }
@@ -267,12 +398,19 @@ export class BrowserManager {
     }
     if (!await control.allowed()) return 'STOPPED'
     const page = await this.#newBackgroundPage(context)
+    this.#runtimePage = page
     const outcome = await applyVacancy(page, task, control)
     if (outcome === 'AUTH' || outcome === 'CAPTCHA' || outcome === 'BROWSER_UNAVAILABLE') {
       this.#verifiedApplicationRun = null
     }
     // Preserve unresolved forms for manual inspection; never close the user's existing tabs.
-    if (outcome === 'SENT' || outcome === 'ALREADY_APPLIED') await page.close().catch(() => undefined)
+    if (outcome === 'SENT' || outcome === 'ALREADY_APPLIED') {
+      await page.close().catch(() => undefined)
+      this.#applicationPages.delete(task.hhVacancyId)
+    } else {
+      for (const [id, existing] of this.#applicationPages) if (existing.isClosed()) this.#applicationPages.delete(id)
+      this.#applicationPages.set(task.hhVacancyId, page)
+    }
     return outcome
   }
 
@@ -308,6 +446,10 @@ export class BrowserManager {
         this.#activeProfileId = null
         this.#authorizationPage = null
         this.#verifiedApplicationRun = null
+        this.#applicationPages.clear()
+        this.#diagnosticPages.clear()
+        this.#diagnosticChoices.clear()
+        this.#fullDiagnostic = null
       }
     })
 

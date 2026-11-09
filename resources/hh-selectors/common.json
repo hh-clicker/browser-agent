@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "common",
+  "context": {
+    "pageType": "hh-common",
+    "task": "Распознать барьеры, требующие ручного действия пользователя.",
+    "notes": [
+      "Капча не закрывается и не решается автоматически.",
+      "URL входа и капчи проверяются кодом независимо от DOM.",
+      "Текстовые признаки капчи остаются независимыми проверками."
+    ]
+  },
+  "selectors": {
+    "challenge": {
+      "kind": "css",
+      "value": "[data-qa*=\"captcha\" i], iframe[src*=\"captcha\" i], .g-recaptcha, .smart-captcha",
+      "purpose": "Видимые элементы капчи",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "many",
+        "action": "read",
+        "referenceTag": "<iframe src=\"…captcha…\">…</iframe>",
+        "required": false,
+        "reads": []
+      }
+    },
+    "searchChallenge": {
+      "kind": "css",
+      "value": "[data-qa*=\"captcha\" i], iframe[src*=\"captcha\" i], .smart-captcha",
+      "purpose": "Видимые элементы капчи в выдаче",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "many",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    }
+  }
+}

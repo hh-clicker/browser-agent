@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "profile",
+  "context": {
+    "pageType": "applicant-profile",
+    "task": "Прочитать список резюме текущего аккаунта: название и ссылка с хешем.",
+    "notes": [
+      "Проверка входа не зависит от этих селекторов.",
+      "Пустой список резюме допустим.",
+      "Идентичность резюме определяется хешем ссылки, а не названием."
+    ]
+  },
+  "selectors": {
+    "root": {
+      "kind": "css",
+      "value": ".ResumeProfileFront-ReactRoot",
+      "purpose": "Корень личного профиля",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "mustHave": [
+          "Содержит раздел резюме текущего аккаунта"
+        ],
+        "referenceTag": "<div class=\"ResumeProfileFront-ReactRoot\">…</div>",
+        "required": true,
+        "reads": []
+      }
+    },
+    "resumeSection": {
+      "kind": "css",
+      "value": "[data-qa=\"compact-resume-title\"]",
+      "purpose": "Заголовок раздела резюме",
+      "contract": {
+        "scope": "root",
+        "cardinality": "one",
+        "action": "read",
+        "referenceTag": "<div>Мои резюме</div>",
+        "required": true,
+        "reads": []
+      }
+    },
+    "resumeCards": {
+      "kind": "css",
+      "value": "[data-qa~=\"resume\"][data-qa-id]",
+      "purpose": "Карточки резюме",
+      "contract": {
+        "scope": "root",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "data-qa-title"
+        ],
+        "mustHave": [
+          "Каждая карточка содержит ссылку /resume/{hash}"
+        ],
+        "exclude": [
+          "Рекомендации услуг",
+          "Контакты и основное содержание профиля"
+        ],
+        "referenceTag": "<div><a href=\"/resume/{hash}\">Название резюме</a>…</div>",
+        "required": false
+      }
+    },
+    "resumeLink": {
+      "kind": "css",
+      "value": "a[data-qa^=\"resume-card-link-\"][href]",
+      "purpose": "Ссылка на резюме, не ссылка редактирования",
+      "contract": {
+        "scope": "resumeCards",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "href"
+        ],
+        "mustHave": [
+          "Хеш резюме из URL",
+          "Домен HH"
+        ],
+        "referenceTag": "<a href=\"/resume/{hash}\">Название резюме</a>",
+        "required": true
+      }
+    },
+    "resumeTitle": {
+      "kind": "css",
+      "value": "[data-qa=\"resume-title\"]",
+      "purpose": "Название резюме, если у карточки нет data-qa-title",
+      "contract": {
+        "scope": "resumeCards",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "exclude": [
+          "Имя владельца профиля",
+          "Рекомендации и кнопки"
+        ],
+        "referenceTag": "<div>Название резюме</div>",
+        "required": false
+      }
+    },
+    "anyResumeLink": {
+      "kind": "css",
+      "value": "a[href*=\"/resume/\"]",
+      "purpose": "Наличие ссылок при нераспознанных карточках",
+      "contract": {
+        "scope": "root",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "href"
+        ],
+        "required": false
+      }
+    }
+  }
+}

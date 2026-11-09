@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "resumeText",
+  "context": {
+    "pageType": "resume-print",
+    "task": "Прочитать профессиональный текст печатного резюме без контактов и фотографии.",
+    "notes": [
+      "Для печатного представления требуется print=true.",
+      "Фильтры исключения контактов и управляющих элементов остаются в коде.",
+      "URL резюме и его хеш проверяются до и после чтения."
+    ]
+  },
+  "selectors": {
+    "root": {
+      "kind": "css",
+      "value": "main",
+      "purpose": "Основная область печатного резюме",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "referenceTag": "<main>…</main>",
+        "required": true,
+        "reads": []
+      }
+    },
+    "ready": {
+      "kind": "css",
+      "value": "[data-qa=\"resume-position\"]",
+      "purpose": "Название желаемой должности",
+      "contract": {
+        "scope": "root",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "referenceTag": "<h2>Желаемая должность</h2>",
+        "required": true
+      }
+    },
+    "blocks": {
+      "kind": "css",
+      "value": "[data-qa=\"resume-position\"], [data-qa=\"resume-salary-expectation\"], [data-qa=\"resume-main-info_area-and-relocation\"], [data-qa=\"resume-specializations\"], [data-qa=\"resume-experience-block\"], [data-qa=\"skills-table\"], [data-qa=\"resume-languages-block\"], [data-qa=\"resume-about-block\"], [data-qa=\"resume-education-block\"], [data-qa=\"resume-additional-info-block\"]",
+      "purpose": "Профессиональные разделы резюме",
+      "contract": {
+        "scope": "root",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "visibleText"
+        ],
+        "exclude": [
+          "Контакты",
+          "Фотография",
+          "Личные данные вне профессиональных блоков",
+          "Реклама и рекомендации"
+        ],
+        "required": true
+      }
+    }
+  }
+}

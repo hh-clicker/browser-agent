@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "id": "vacancy",
+  "context": {
+    "pageType": "vacancy-detail",
+    "task": "Прочитать описание, архивность и состояние отклика текущей вакансии.",
+    "notes": [
+      "Проверки URL и vacancyId выполняются кодом.",
+      "Состояние доставки подтверждается сочетанием признаков, не одной кнопкой.",
+      "Первоначальная кнопка отклика может сразу отправить отклик, без формы.",
+      "Архивные вакансии не являются источником текста для анализа."
+    ]
+  },
+  "selectors": {
+    "title": {
+      "kind": "css",
+      "value": "h1[data-qa=\"vacancy-title\"]",
+      "purpose": "Заголовок текущей вакансии",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "innerText"
+        ],
+        "referenceTag": "<h1>Название вакансии</h1>",
+        "required": true
+      }
+    },
+    "description": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-description\"]",
+      "purpose": "Полный текст описания работодателя",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "visibleText"
+        ],
+        "exclude": [
+          "Рекомендованные вакансии",
+          "Меню, контакты, кнопки и брендовая обвязка"
+        ],
+        "referenceTag": "<div><p>Обязанности…</p><p>Требования…</p></div>",
+        "required": true
+      }
+    },
+    "archivedTitle": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-title-archived-text\"]",
+      "purpose": "Пометка архива в заголовке",
+      "contract": {
+        "scope": "title",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "archivedDescription": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-archive-description\"]",
+      "purpose": "Пояснение об архивной вакансии",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "actions": {
+      "kind": "css",
+      "value": ".vacancy-actions_magritte-vacancy-top",
+      "purpose": "Основные действия текущей вакансии",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "exclude": [
+          "Нижняя дублирующая панель",
+          "Действия рекомендованных вакансий"
+        ],
+        "required": true,
+        "reads": []
+      }
+    },
+    "respond": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-link-top\"]",
+      "purpose": "Кнопка первоначального отклика",
+      "contract": {
+        "scope": "actions",
+        "cardinality": "one",
+        "action": "submit",
+        "reads": [
+          "href"
+        ],
+        "mustHave": [
+          "href указывает на /applicant/vacancy_response с текущим vacancyId"
+        ],
+        "referenceTag": "<a href=\"/applicant/vacancy_response?vacancyId={id}\">Откликнуться</a>",
+        "required": true
+      }
+    },
+    "delivered": {
+      "kind": "css",
+      "value": ".vacancy-actions_responded:not([data-qa=\"vacancy-serp__vacancy\"] *):not([data-qa=\"vacancy-view-vacancies-from-search\"] *)",
+      "purpose": "Подтверждение отклика именно на текущую вакансию",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "exclude": [
+          "Отклики в карточках рекомендаций"
+        ],
+        "required": false,
+        "reads": []
+      }
+    },
+    "viewResponse": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-link-view-topic\"]",
+      "purpose": "Переход к имеющемуся отклику, только читаем наличие",
+      "contract": {
+        "scope": {
+          "anyOf": [
+            "delivered",
+            "actions"
+          ]
+        },
+        "cardinality": "one",
+        "action": "read",
+        "referenceTag": "<button>Открыть отклик</button>",
+        "required": false,
+        "reads": []
+      }
+    },
+    "respondAgain": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-link-top-again\"]",
+      "purpose": "Предложение откликнуться другим резюме, только читаем наличие",
+      "contract": {
+        "scope": "actions",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "questionnaire": {
+      "kind": "css",
+      "value": "[data-qa=\"employer-asking-for-test\"], [data-qa=\"task-body\"], [data-qa=\"task-question\"]",
+      "purpose": "Анкета или задание работодателя",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "many",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    }
+  }
+}

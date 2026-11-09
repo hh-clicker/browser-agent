@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { chromium, type Page } from 'playwright'
-import { extractVacancyText } from '../src/hh/vacancy-text.js'
+import { extractVacancyText as extract } from '../src/hh/vacancy-text.js'
+import { bundledSelectors } from './helpers/bundled-selectors.js'
+import { parseSelectorGroup, SelectorRegistry } from '../src/hh/selector-registry.js'
+const bundled = bundledSelectors()
+const extractVacancyText: typeof extract = (page, id, registry = bundled) => extract(page, id, registry)
 
 // Synthetic equivalents of ordinary and branded markup. No copied HH assets or user data.
 const description = `<div data-qa="vacancy-description">
@@ -32,6 +36,17 @@ async function offline(body: string, check: (page: Page, requests: string[]) => 
     await check(page, requests)
   } finally { await browser.close() }
 }
+
+test('configured description XPath preserves vacancy identity and recommendation exclusions', async () => {
+  const registry = new SelectorRegistry([parseSelectorGroup({ schemaVersion: 1, id: 'vacancy', selectors: {
+    description: { kind: 'xpath', value: '//section[@class="job-text"]', purpose: 'Employer description' },
+  } })])
+  await offline(`<section class="job-text"><p>Build services.</p><button>Ignore</button></section>
+    <aside data-qa="vacancy-view-vacancies-from-search"><section class="job-text">Other vacancy</section></aside>`, async page => {
+    assert.equal(await extractVacancyText(page, '123', registry), 'Build services.')
+    assert.equal(await extractVacancyText(page, '999', registry), null)
+  })
+})
 
 for (const branded of [false, true]) {
   test(`${branded ? 'branded' : 'ordinary'} description keeps paragraphs and lists, without template or image text`, async () => {

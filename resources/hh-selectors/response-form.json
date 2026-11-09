@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "id": "responseForm",
+  "context": {
+    "pageType": "vacancy-response-dialog",
+    "task": "Найти форму отклика, выбранное резюме, поле письма и кнопку отправки.",
+    "notes": [
+      "Попап открывается поверх вакансии или в контексте страницы отклика.",
+      "Поле письма может раскрываться отдельной кнопкой.",
+      "Кнопка отправки находится вне тега form.",
+      "При единственном фиксированном резюме раскрываемого списка нет.",
+      "Селекторы раскрытого списка сохранены по прежней реализации и синтетическим тестам."
+    ]
+  },
+  "selectors": {
+    "dialog": {
+      "kind": "css",
+      "value": "[role=\"dialog\"]",
+      "purpose": "Диалог, содержащий основную форму отклика",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "mustHave": [
+          "Содержит form",
+          "Заголовок соответствует текущей вакансии"
+        ],
+        "required": true,
+        "reads": []
+      }
+    },
+    "form": {
+      "kind": "css",
+      "value": "form#RESPONSE_MODAL_FORM_ID[name=\"vacancy_response\"]",
+      "purpose": "Основная форма отклика",
+      "contract": {
+        "scope": "dialog",
+        "cardinality": "one",
+        "action": "read",
+        "referenceTag": "<form name=\"vacancy_response\" id=\"RESPONSE_MODAL_FORM_ID\">…</form>",
+        "required": true,
+        "reads": []
+      }
+    },
+    "resumeTitle": {
+      "kind": "css",
+      "value": "[data-qa=\"resume-title\"]",
+      "purpose": "Название выбранного резюме",
+      "contract": {
+        "scope": "form",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "required": true
+      }
+    },
+    "resumeTrigger": {
+      "kind": "xpath",
+      "value": "ancestor::*[@role=\"button\"][1]",
+      "purpose": "Ближайшая кнопка-предок заголовка резюме",
+      "contract": {
+        "scope": "resumeTitle",
+        "cardinality": "one",
+        "action": "open",
+        "required": false,
+        "reads": []
+      }
+    },
+    "selectWrapper": {
+      "kind": "css",
+      "value": "[class*=\"magritte-select-layout\"]",
+      "purpose": "Отличает выбираемое резюме от фиксированного",
+      "contract": {
+        "scope": "form",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "resumeList": {
+      "kind": "css",
+      "value": "[data-qa=\"magritte-select-option-list\"]",
+      "purpose": "Раскрытый список резюме",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "resumeOptions": {
+      "kind": "css",
+      "value": "[role=\"listbox\"] [role=\"option\"]",
+      "purpose": "Варианты в раскрытом списке",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "many",
+        "action": "open",
+        "reads": [
+          "data-magritte-select-option",
+          "aria-selected",
+          "aria-disabled"
+        ],
+        "required": false
+      }
+    },
+    "selectedResume": {
+      "kind": "css",
+      "value": "[role=\"option\"][aria-selected=\"true\"]",
+      "purpose": "Выбранный вариант",
+      "contract": {
+        "scope": "resumeList",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "data-magritte-select-option"
+        ],
+        "required": false
+      }
+    },
+    "hiddenResumeWarning": {
+      "kind": "css",
+      "value": "[data-qa=\"hidden-resume-warning\"]",
+      "purpose": "Предупреждение о недоступном резюме",
+      "contract": {
+        "scope": "form",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "addLetter": {
+      "kind": "css",
+      "value": "[data-qa=\"add-cover-letter\"]",
+      "purpose": "Раскрытие поля письма",
+      "contract": {
+        "scope": "dialog",
+        "cardinality": "one",
+        "action": "open",
+        "required": false,
+        "reads": []
+      }
+    },
+    "letter": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-popup-form-letter-input\"]",
+      "purpose": "Поле сопроводительного письма",
+      "contract": {
+        "scope": "form",
+        "cardinality": "one",
+        "action": "input",
+        "reads": [
+          "value"
+        ],
+        "referenceTag": "<textarea>…</textarea>",
+        "required": true
+      }
+    },
+    "submit": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-submit-popup\"][form=\"RESPONSE_MODAL_FORM_ID\"]",
+      "purpose": "Отправка основного отклика",
+      "contract": {
+        "scope": "dialog",
+        "cardinality": "one",
+        "action": "submit",
+        "mustHave": [
+          "Связана с основной формой через form",
+          "Доступна для нажатия"
+        ],
+        "referenceTag": "<button type=\"submit\" form=\"RESPONSE_MODAL_FORM_ID\">Отправить</button>",
+        "required": true,
+        "reads": []
+      }
+    }
+  }
+}

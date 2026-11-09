@@ -31,6 +31,24 @@ const commandClient = new CommandClient(backendConfig)
 let runtimeStatus: AgentRuntimeStatus = 'CONNECTING'
 
 async function executeCommand(command: BrowserAgentCommand): Promise<BrowserCommandExecutionResult | void> {
+  browserManager.beginRuntimeCommand()
+  try {
+    const result = await executeBrowserCommand(command)
+    if (['DIAGNOSE_SELECTORS', 'FOCUS_DIAGNOSTIC', 'FOCUS_VACANCY', 'CLOSE_BROWSER', 'OPEN_URL'].includes(command.type)) return result
+    const application = result?.application
+    const problem = result?.authorization?.status === 'UNKNOWN' || application !== undefined &&
+      ['NOT_SENT', 'UNKNOWN', 'TEXT_UNAVAILABLE', 'SENT_LETTER_UNCONFIRMED', 'RESUME_UNAVAILABLE'].includes(application)
+    const selectorDiagnostics = await browserManager.finishRuntimeCommand(problem)
+    return selectorDiagnostics ? { ...(result ?? {}), selectorDiagnostics } : result
+  } catch (cause) {
+    if (['DIAGNOSE_SELECTORS', 'FOCUS_DIAGNOSTIC', 'FOCUS_VACANCY', 'CLOSE_BROWSER', 'OPEN_URL'].includes(command.type)) throw cause
+    const selectorDiagnostics = await browserManager.finishRuntimeCommand(true)
+    if (selectorDiagnostics && cause instanceof Error) Object.assign(cause, { selectorDiagnostics })
+    throw cause
+  }
+}
+
+async function executeBrowserCommand(command: BrowserAgentCommand): Promise<BrowserCommandExecutionResult | void> {
   const commandType: string = command.type
 
   switch (commandType) {
@@ -44,6 +62,14 @@ async function executeCommand(command: BrowserAgentCommand): Promise<BrowserComm
     case 'DISCOVER_RESUMES':
       if (!command.payload) throw new Error('DISCOVER_RESUMES command has no profile payload')
       return browserManager.discoverResumes(command.payload.profileId, command.payload.url)
+    case 'DIAGNOSE_SELECTORS':
+      if (!command.payload?.diagnosticPageType || !['CURRENT', 'FULL', 'PROFILE', 'SEARCH', 'VACANCY', 'RESUME'].includes(command.payload.diagnosticPageType))
+        throw new Error('Не указан тип страницы для диагностики')
+      return { selectorDiagnostics: await browserManager.diagnoseSelectors(command.payload.profileId, command.payload.diagnosticPageType, command.payload.diagnosticTarget, command.id) }
+    case 'FOCUS_DIAGNOSTIC':
+      if (!command.payload?.diagnosticTarget?.tabId) throw new Error('Не указана вкладка диагностики')
+      await browserManager.focusDiagnostic(command.payload.profileId, command.payload.diagnosticTarget.tabId)
+      return
     case 'SCAN_SEARCH':
       if (!command.payload?.url || !command.payload.pagesLimit) throw new Error('SCAN_SEARCH command has no search payload')
       return browserManager.scanSearch(command.payload.profileId, command.payload.url, command.payload.pagesLimit,
@@ -69,7 +95,12 @@ async function executeCommand(command: BrowserAgentCommand): Promise<BrowserComm
       return { application: await browserManager.inspectApplication(command.payload.profileId, command.payload.url) }
     case 'OPEN_URL':
       if (!command.payload?.url) throw new Error('OPEN_URL command has no URL payload')
+      await browserManager.open(command.payload)
       await browserManager.openUrl(command.payload.profileId, command.payload.url)
+      return
+    case 'FOCUS_VACANCY':
+      if (!command.payload?.url) throw new Error('Не указана вакансия')
+      await browserManager.focusVacancy(command.payload.profileId, command.payload.url)
       return
     case 'CLOSE_BROWSER':
       await browserManager.close()

@@ -1,4 +1,5 @@
 import type { Page } from 'playwright'
+import { loadHhSelectors, type SelectorRegistry } from './selector-registry.js'
 
 export interface DiscoveredResume {
   hhResumeId: string
@@ -6,24 +7,34 @@ export interface DiscoveredResume {
   plainText?: string
 }
 
-export async function readResumeCards(page: Page): Promise<DiscoveredResume[]> {
+export async function readResumeCards(page: Page, registry?: SelectorRegistry): Promise<DiscoveredResume[]> {
   try {
-    const root = page.locator('.ResumeProfileFront-ReactRoot')
-    await root.locator('[data-qa="compact-resume-title"]').waitFor({ state: 'visible', timeout: 10_000 })
+    const selectors = registry ?? loadHhSelectors()
+    const root = page.locator(selectors.locator('profile', 'root'))
+    const heading = root.locator(selectors.locator('profile', 'resumeSection'))
+    const cardLocator = root.locator(selectors.locator('profile', 'resumeCards'))
+    await heading.waitFor({ state: 'visible', timeout: 10_000 })
     // Заголовок может появиться раньше карточек при клиентской загрузке.
-    await root.locator('[data-qa~="resume"][data-qa-id]').first()
+    await cardLocator.first()
       .waitFor({ state: 'attached', timeout: 3_000 }).catch(() => undefined)
     // Читаем только карточки, не initial state, контакты и содержимое резюме.
-    const cards = await root.locator('[data-qa~="resume"][data-qa-id]').evaluateAll((elements) => elements.map((card) => ({
-      href: card.querySelector('a[data-qa^="resume-card-link-"][href]')?.getAttribute('href'),
-      title: card.getAttribute('data-qa-title') || card.querySelector('[data-qa="resume-title"]')?.textContent,
-    })))
+    const count = await cardLocator.count()
+    if (count > 100) throw new Error('Too many cards')
+    const cards: { href: string | null; title: string | null }[] = []
+    for (let index = 0; index < count; index++) {
+      const card = cardLocator.nth(index)
+      const link = card.locator(selectors.locator('profile', 'resumeLink')).first()
+      const title = card.locator(selectors.locator('profile', 'resumeTitle')).first()
+      cards.push({
+        href: await link.count() ? await link.getAttribute('href') : null,
+        title: await card.getAttribute('data-qa-title') || (await title.count() ? await title.textContent() : null),
+      })
+    }
     const profileUrl = new URL(page.url())
     if (profileUrl.protocol !== 'https:' || !(profileUrl.hostname === 'hh.ru' || profileUrl.hostname.endsWith('.hh.ru'))
       || profileUrl.pathname.replace(/\/$/, '') !== '/applicant/profile/me') throw new Error('Profile navigation changed')
-    if (!await root.locator('[data-qa="compact-resume-title"]').isVisible()) throw new Error('Resume section disappeared')
-    if (!cards.length && await root.locator('a[data-qa^="resume-card-link-"]').count() > 0) throw new Error('Resume card markup changed')
-    if (cards.length > 100) throw new Error('Too many cards')
+    if (!await heading.isVisible()) throw new Error('Resume section disappeared')
+    if (!cards.length && await root.locator(selectors.locator('profile', 'anyResumeLink')).count() > 0) throw new Error('Resume card markup changed')
     const results = new Map<string, DiscoveredResume>()
     for (const card of cards) {
       const url = new URL(card.href ?? '', profileUrl)

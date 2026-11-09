@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "id": "letterForm",
+  "context": {
+    "pageType": "attach-letter-dialog",
+    "task": "Добавить письмо к уже отправленному отклику.",
+    "notes": [
+      "ID формы динамический, его нельзя закреплять в селекторе.",
+      "Это другая форма, не основная форма отклика.",
+      "Закрытие диалога само по себе не подтверждает прикрепление.",
+      "Сетевой endpoint и проверки topicId остаются в коде."
+    ]
+  },
+  "selectors": {
+    "attach": {
+      "kind": "css",
+      "value": "[data-qa=\"responded-success-attach-cover-letter\"]",
+      "purpose": "Открыть форму письма",
+      "contract": {
+        "scope": "vacancy.delivered",
+        "cardinality": "one",
+        "action": "open",
+        "referenceTag": "<button type=\"button\">Прикрепить сопроводительное письмо</button>",
+        "required": false,
+        "reads": []
+      }
+    },
+    "dialog": {
+      "kind": "css",
+      "value": "[role=\"dialog\"]",
+      "purpose": "Диалог, содержащий форму добавления письма",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "mustHave": [
+          "Содержит form с action /applicant/vacancy_response/edit_ajax"
+        ],
+        "required": true,
+        "reads": []
+      }
+    },
+    "form": {
+      "kind": "css",
+      "value": "form[action=\"/applicant/vacancy_response/edit_ajax\"]",
+      "purpose": "Форма добавления письма",
+      "contract": {
+        "scope": "dialog",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "id"
+        ],
+        "referenceTag": "<form id=\"{formId}\" action=\"/applicant/vacancy_response/edit_ajax\">…</form>",
+        "required": true
+      }
+    },
+    "topic": {
+      "kind": "css",
+      "value": "input[name=\"topicId\"]",
+      "purpose": "Идентификатор уже отправленного отклика",
+      "contract": {
+        "scope": "form",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "nonEmptyValue"
+        ],
+        "referenceTag": "<input type=\"hidden\" name=\"topicId\" value=\"{topicId}\">",
+        "required": true
+      }
+    },
+    "letter": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-popup-form-letter-input\"]",
+      "purpose": "Текст письма к существующему отклику",
+      "contract": {
+        "scope": "form",
+        "cardinality": "one",
+        "action": "input",
+        "reads": [
+          "value"
+        ],
+        "referenceTag": "<textarea name=\"text\">…</textarea>",
+        "required": true
+      }
+    },
+    "submit": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-response-letter-submit\"]",
+      "purpose": "Отправить письмо к существующему отклику",
+      "contract": {
+        "scope": "dialog",
+        "cardinality": "one",
+        "action": "submit",
+        "reads": [
+          "form"
+        ],
+        "mustHave": [
+          "form совпадает с id найденной формы"
+        ],
+        "referenceTag": "<button type=\"submit\" form=\"{formId}\">Отправить</button>",
+        "required": true
+      }
+    }
+  }
+}

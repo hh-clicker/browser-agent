@@ -1,0 +1,269 @@
+{
+  "schemaVersion": 1,
+  "id": "search",
+  "context": {
+    "pageType": "vacancy-search",
+    "task": "Прочитать карточки вакансий текущей выдачи и пагинацию.",
+    "notes": [
+      "DOM-карточки являются источником ID и порядка.",
+      "JSON-обогащение допускается только при совпадении ID и порядка.",
+      "Внутренние поля карточек читаются через DOM CSS API: для них нужен CSS, а не XPath.",
+      "Ссылки выдачи не используются для автоматического отклика."
+    ]
+  },
+  "selectors": {
+    "accountMenu": {
+      "kind": "css",
+      "value": "[data-qa=\"applicantProfileDesktopDrop-button\"], [data-qa=\"applicantProfileMobileDrop-button\"]",
+      "purpose": "Доступ авторизованного соискателя к личному разделу: ссылка на профиль/резюме или кнопка меню",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "many",
+        "action": "read",
+        "referenceTag": "<button>Меню профиля</button>",
+        "required": false,
+        "reads": []
+      }
+    },
+    "cards": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-serp__vacancy\"]",
+      "purpose": "Карточки выдачи",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "many",
+        "action": "read",
+        "mustHave": [
+          "Ссылка /vacancy/{id}",
+          "Название вакансии и компании"
+        ],
+        "referenceTag": "<article>…<a href=\"/vacancy/{id}\">Название вакансии</a>…</article>",
+        "required": true,
+        "reads": []
+      }
+    },
+    "pager": {
+      "kind": "css",
+      "value": "[data-qa=\"pager-block\"]",
+      "purpose": "Область пагинации",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "referenceTag": "<nav>…</nav>",
+        "required": false,
+        "reads": []
+      }
+    },
+    "currentPage": {
+      "kind": "css",
+      "value": "[aria-current=\"true\"], [aria-current=\"page\"]",
+      "purpose": "Текущая страница внутри пагинации",
+      "contract": {
+        "scope": "pager",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "closestLinkHref"
+        ],
+        "required": true
+      }
+    },
+    "pageLinks": {
+      "kind": "css",
+      "value": "a[href]",
+      "purpose": "Ссылки навигации внутри пагинации, включая числовые страницы и переходы следующая/предыдущая; без многоточий, не являющихся ссылками",
+      "contract": {
+        "scope": "pager",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "href"
+        ],
+        "required": false
+      }
+    },
+    "title": {
+      "kind": "css",
+      "value": "[data-qa=\"serp-item__title\"]",
+      "purpose": "Название и ссылка вакансии",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "href",
+          "textContent"
+        ],
+        "mustHave": [
+          "Ссылка /vacancy/{id}"
+        ],
+        "referenceTag": "<a href=\"/vacancy/{id}\">Название вакансии</a>",
+        "required": true
+      }
+    },
+    "employerLink": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-serp__vacancy-employer\"]",
+      "purpose": "Ссылка работодателя",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "reads": [
+          "href"
+        ],
+        "referenceTag": "<a href=\"/employer/{id}\">Компания</a>",
+        "required": false
+      }
+    },
+    "employerName": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-serp__vacancy-employer-text\"]",
+      "purpose": "Название работодателя",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "required": true
+      }
+    },
+    "responseLink": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-serp__vacancy_response\"]",
+      "purpose": "Ссылка отклика как запасной источник employerId, без клика",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "reads": [
+          "href"
+        ],
+        "required": false
+      }
+    },
+    "location": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-serp__vacancy-address\"]",
+      "purpose": "Основной город, населённый пункт или адрес вакансии; без соседних станций метро и транспортных ориентиров",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "required": false
+      }
+    },
+    "experience": {
+      "kind": "css",
+      "value": "[data-qa^=\"vacancy-serp__vacancy-work-experience-\"]",
+      "purpose": "Требуемый опыт",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "required": false
+      }
+    },
+    "remote": {
+      "kind": "css",
+      "value": "[data-qa=\"vacancy-label-work-schedule-remote\"]",
+      "purpose": "Признак удалённой работы",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "required": false
+      }
+    },
+    "labels": {
+      "kind": "css",
+      "value": "[data-qa^=\"vacancy-label-\"], [data-qa^=\"vacancy-serp__vacancy-compensation-frequency-\"]",
+      "purpose": "Дополнительные признаки вакансии и частота выплат, в том числе удалённость, соответствие навыкам, отклик без резюме, скорость ответа. Опыт и основные реквизиты вакансии не входят; признаки могут находиться в разных частях карточки. Удалённость может одновременно входить в remote",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "textContent"
+        ],
+        "required": false
+      }
+    },
+    "salaryContainer": {
+      "kind": "css",
+      "value": "[class*=\"compensation-labels--\"]",
+      "purpose": "Контейнер зарплаты",
+      "contract": {
+        "scope": "cards",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "salaryValues": {
+      "kind": "css",
+      "value": "data[value]",
+      "purpose": "Числовые границы зарплаты",
+      "contract": {
+        "scope": "salarySpan",
+        "cardinality": "many",
+        "action": "read",
+        "reads": [
+          "value"
+        ],
+        "required": false
+      }
+    },
+    "rubleCurrency": {
+      "kind": "css",
+      "value": "data[value=\"RUB\"]",
+      "purpose": "Валюта рубли",
+      "contract": {
+        "scope": "salarySpan",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false,
+        "reads": []
+      }
+    },
+    "initialState": {
+      "kind": "css",
+      "value": "#HH-Lux-InitialState",
+      "purpose": "Встроенный JSON для обогащения и общего числа результатов",
+      "contract": {
+        "scope": "$page",
+        "cardinality": "one",
+        "action": "read",
+        "reads": [
+          "templateJson"
+        ],
+        "referenceTag": "<template id=\"HH-Lux-InitialState\">{…}</template>",
+        "required": false
+      }
+    },
+    "salarySpan": {
+      "kind": "css",
+      "value": ":scope > span:has(data[value])",
+      "purpose": "Строка зарплаты внутри компенсации",
+      "contract": {
+        "scope": "salaryContainer",
+        "cardinality": "zeroOrOne",
+        "action": "read",
+        "required": false
+      }
+    }
+  }
+}

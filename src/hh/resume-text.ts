@@ -1,18 +1,17 @@
 import type { Page } from 'playwright'
+import { loadHhSelectors, type SelectorRegistry } from './selector-registry.js'
 
-export async function extractResumeText(page: Page, hash: string): Promise<string> {
+export async function extractResumeText(page: Page, hash: string, registry: SelectorRegistry = loadHhSelectors()): Promise<string> {
   const url = new URL(page.url())
   if (url.protocol !== 'https:' || !(url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru'))
     || url.pathname !== `/resume/${hash}` || url.searchParams.get('print') !== 'true') throw new Error('Resume URL changed')
-  await page.locator('main [data-qa="resume-position"]').first().waitFor({ state: 'visible', timeout: 8000 })
-  return page.locator('main').evaluate((root, expectedUrl) => {
+  const root = page.locator(registry.locator('resumeText', 'root'))
+  await root.first().waitFor({ state: 'visible', timeout: 8000 })
+  if (await root.count() !== 1) throw new Error('RESUME_ROOT_AMBIGUOUS')
+  await root.locator(registry.locator('resumeText', 'ready')).first().waitFor({ state: 'visible', timeout: 8000 })
+  return root.locator(registry.locator('resumeText', 'blocks')).evaluateAll((candidates, expectedUrl) => {
     if (location.href !== expectedUrl) throw new Error('Resume navigation changed')
-    const selectors = [
-      'resume-position', 'resume-salary-expectation', 'resume-main-info_area-and-relocation',
-      'resume-specializations', 'resume-experience-block', 'skills-table',
-      'resume-languages-block', 'resume-about-block', 'resume-education-block', 'resume-additional-info-block',
-    ].map(qa => `[data-qa="${qa}"]`).join(',')
-    const nodes = [...root.querySelectorAll(selectors)].filter(node => node.getClientRects().length > 0)
+    const nodes = candidates.filter(node => node.getClientRects().length > 0)
     const blockTags = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'SECTION', 'TR', 'TABLE'])
     // Keep this callback self-contained: tsx/esbuild keepNames adds a Node-side
     // __name helper to nested named functions, which is unavailable inside page.evaluate.
@@ -49,18 +48,21 @@ export async function extractResumeText(page: Page, hash: string): Promise<strin
   }, url.href)
 }
 
-export async function readResumePrintText(createPage: () => Promise<Page>, hash: string): Promise<string> {
+export async function readResumePrintText(createPage: () => Promise<Page>, hash: string, registry: SelectorRegistry = loadHhSelectors(),
+    preserveFailure?: (page: Page) => Promise<boolean>): Promise<string> {
   if (!/^[a-f0-9]{20,100}$/.test(hash)) throw new Error('Некорректный идентификатор резюме.')
   const page = await createPage()
   let stage = 'открытие печатной страницы'
+  let preserve = false
   try {
     await page.route('**/*', route => ['image', 'media', 'font'].includes(route.request().resourceType()) ? route.abort() : route.fallback())
     await page.addInitScript(() => { window.print = () => {} })
     const response = await page.goto(`https://hh.ru/resume/${hash}?print=true`, { waitUntil: 'domcontentloaded', timeout: 18000 })
     if (!response?.ok()) throw new Error('Print page unavailable')
     stage = 'распознавание страницы и извлечение текста'
-    return await extractResumeText(page, hash)
+    return await extractResumeText(page, hash, registry)
   } catch (cause) {
+    preserve = await preserveFailure?.(page).catch(() => false) ?? false
     // Never expose HTML, contacts or Playwright's call log in the command error.
     const message = cause instanceof Error ? cause.message : ''
     const reason = message.includes('RESUME_TEXT_EMPTY') ? 'Распознанные блоки резюме не содержат текста.'
@@ -68,6 +70,6 @@ export async function readResumePrintText(createPage: () => Promise<Page>, hash:
         : 'Проверьте вход, доступность резюме на HH и повторите добавление.'
     throw new Error(`Не удалось прочитать текст резюме. Этап: ${stage}. ${reason}`)
   } finally {
-    await page.close().catch(() => {})
+    if (!preserve) await page.close().catch(() => {})
   }
 }
