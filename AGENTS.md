@@ -2,7 +2,7 @@
 
 ## Назначение и границы
 
-Windows-процесс на Playwright: управляемый Chrome, чтение HH и разрешённые backend действия.
+Host-процесс на Playwright для Windows, Linux и macOS: управляемый Chrome, чтение HH и разрешённые backend действия.
 
 ## Карта кода
 

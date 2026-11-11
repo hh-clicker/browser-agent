@@ -312,6 +312,10 @@ Sol / medium). Сначала получается полный кандидат
 - npm
 - установленный Google Chrome
 
+Поддерживаются Windows x64, Linux x86_64 и macOS 14+ на Intel/Apple Silicon. Агент работает на desktop-хосте,
+а не в контейнере: ему нужен доступ к графическому сеансу и обычному Chrome.
+После новой установки Chrome один раз откройте его вручную и завершите первоначальную настройку.
+
 ## Команды
 
 ```powershell
@@ -321,11 +325,17 @@ npm.cmd start
 
 Команды выполняются из `browser-agent` в Windows PowerShell. Для разработки с автоматическим перезапуском используйте `npm.cmd run dev`. Установка зависимостей Windows и порядок запуска всех компонентов описаны в [infra/README.md](../infra/README.md).
 
+На Linux и macOS используйте `npm ci`, `npm start` и `npm run dev` без суффикса `.cmd`.
+Порядок ручного запуска Linux описан в [инструкции launcher](https://github.com/hh-clicker/launcher/blob/master/LINUX.md#запуск-без-лаунчера-из-исходников);
+при установке готового пакета Browser Agent запускает сам лаунчер.
+
 По умолчанию профили хранятся в пользовательском каталоге данных приложения. Для каждого профиля из HH Clicker создаётся отдельная директория:
 
-```text
-%LOCALAPPDATA%\HH Clicker\data\browser-agent\profiles\<profileId>
-```
+| Платформа | Каталог профилей по умолчанию |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\HH Clicker\data\browser-agent\profiles\<profileId>` |
+| Linux | `$XDG_DATA_HOME/HH Clicker/data/browser-agent/profiles/<profileId>` или `~/.local/share/HH Clicker/data/browser-agent/profiles/<profileId>` |
+| macOS | `~/Library/Application Support/HH Clicker/data/browser-agent/profiles/<profileId>` |
 
 Корневой путь можно переопределить переменной окружения `HH_CLICKER_BROWSER_PROFILE_DIR`.
 
@@ -348,3 +358,20 @@ Backend по умолчанию доступен по адресу `http://local
 npm.cmd run build
 node dist/main.js
 ```
+
+## Офлайн-проверки
+
+Для headless DOM-сценариев нужен Chromium из версии Playwright проекта. Если он ещё не загружен,
+один раз выполните `npx playwright install chromium` после `npm.cmd ci`; это подготовка окружения,
+а не часть автономного теста. Для обычной работы Browser Agent продолжает использовать установленный Chrome.
+
+```powershell
+npm.cmd run type-check
+npm.cmd run build
+node --import tsx --test tests/*.test.ts
+```
+
+Офлайн-тесты используют синтетический HTML и штатные селекторы из репозитория. Передавайте явный
+`SelectorRegistry` из `tests/helpers/bundled-selectors.ts` или собственные тестовые группы:
+вызов `loadHhSelectors()` без изоляции читает реальные локальные ИИ-исправления установленного приложения.
+Для тестов сохранения исправлений используйте отдельную временную папку.
